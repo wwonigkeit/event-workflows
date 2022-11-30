@@ -1,0 +1,29 @@
+# Example workflow: 'Send a message to a Google Chat Bot or Room'
+# 
+# The Chatroom Webhook: https://chat.googleapis.com/v1/spaces/AAAAJqBP7rw/messages?key=<key>
+#
+# This workflow will send a message to the Google Chat room
+# defined by the webhook URL above.
+# The workflow expects the following input:
+# {
+#   "message": "This is a sample message to be sent"
+# }
+#
+#
+
+description: "This sends a message to a Google Chat room" 
+
+functions:
+- id: pushtochat
+  image: vorteil/googlemsg
+  type: knative-workflow
+
+states:
+- id: pushtochat
+  type: action
+  action:
+    function: pushtochat
+    secrets: ["GOOGLE_CHAT_WEBHOOK"]
+    input: 
+      message: jq(.message)
+      url: jq(.secrets.GOOGLE_CHAT_WEBHOOK)

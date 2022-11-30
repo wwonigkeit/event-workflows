@@ -1,0 +1,169 @@
+# Example workflow: 'Receive AWS CloudEvents and update FreshService'
+# 
+# The FreshService URL: https://direktiv.freshservice.com/cmdb/items
+#
+# This workflow uses events created by AWS EventBridge. For every state 
+# a virtual machine reports (EC2 type instance), the workflow will verify
+# whether the machine exists in FreshService CMDB, then update the status
+# of the machine or create the machine
+
+description: "Workflow which receives and process AWS EC2 instances state changes to Freshservice CMDB"
+
+# The workflow will be started when an "EC2 Instance State-change Notification" notification 
+# is received from AWS EventBridge. The first state to transition to uses the aws-cli to collect the machine
+# information from AWS
+start:
+  type: event
+  state: get-fresh-url
+  event: 
+    type: "EC2 Instance State-change Notification"
+
+functions:
+  # AWS CLI container - runs AWS CLI commands
+  - id: get-aws-instance
+    image: direktiv/awsgo
+    type: knative-workflow
+  # Generic HTTP(S) request container for REST API interface access
+  - id: query-fresh-service-cmdb
+    image: direktiv/request
+    type: knative-workflow
+  # Google Chat workflow for communications / messaging
+  - id: send-google-chat-msg
+    type: subflow
+    workflow: /aws-events/send-googlechat
+
+states:
+
+  # The first state retrieves the FreshService URL from the stored variable (workflow level)
+  - id: get-fresh-url
+    type: getter
+    variables:
+      - key: freshurl # This variable is the variable name
+        scope: workflow # This variable is on a workflow level to ensure persistence across workflow instances
+      - key: awsregion # This variable is the variable name
+        scope: workflow # This variable is on a workflow level to ensure persistence across workflow instances        
+    transition: get-machine-cmdb-details
+
+  # Check that the machine details from CMDB
+  - id: get-machine-cmdb-details
+    type: action
+    action:
+      secrets: ["FRESH_USERNAME","FRESH_PASSWORD"]
+      function: query-fresh-service-cmdb
+      input:
+        method: "GET"
+        url: 'jq(.var.freshurl + "/cmdb/items/list.json?field=name&q=" + ."EC2 Instance State-change Notification".detail."instance-id")'
+        username: jq(.secrets.FRESH_USERNAME)
+        password: jq(.secrets.FRESH_PASSWORD)
+        headers:
+          "Content-Type": "application/json"
+    transition: check-machine-exists-in-cmdb
+#
+#
+# Check that the machine exists in the CMDB based on the AWS CloudEvent data
+  - id: check-machine-exists-in-cmdb
+    type: switch
+    conditions:
+    - condition: jq(.return.body.config_items == [])
+      transition: check-machine-state
+      transform: 'jq(del(.return))'
+    defaultTransition: update-cmdb
+#
+#
+# Check that the machine state from the AWS CloudEvent data
+  - id: check-machine-state
+    type: switch
+    conditions:
+    - condition: jq(."EC2 Instance State-change Notification".detail.state == "running")
+      transition: get-running-instance-details
+    defaultTransition: print-machine-state
+#
+#
+# Get the machine information directly from AWS using AWS CLI
+  - id: get-running-instance-details
+    type: action
+    action:
+      function: get-aws-instance
+      secrets: ["AWS_KEY","AWS_SECRET"]
+      input:
+        access-key: jq(.secrets.AWS_KEY)
+        access-secret: jq(.secrets.AWS_SECRET)
+        region: jq(.var.awsregion)
+        command: 'jq(["ec2", "describe-instances", "--instance-ids", ."EC2 Instance State-change Notification".detail."instance-id"])'
+    transform: 'jq(.return.Reservations[0].Instances[0] | del(."EC2 Instance State-change Notification"))'
+    transition: push-instance-2-cmdb
+#
+#
+# Create the instance in the CMDB
+  - id: push-instance-2-cmdb
+    type: action
+    log: jq(.)
+    action:
+      secrets: ["FRESH_USERNAME","FRESH_PASSWORD"]
+      function: query-fresh-service-cmdb
+      input: 
+        method: "POST"
+        url: jq(.var.freshurl + "/cmdb/items.json"
+        username: jq(.secrets.FRESH_USERNAME)
+        password: jq(.secrets.FRESH_PASSWORD)
+        headers:
+          "Content-Type": "application/json"
+        body: 'jq({
+            "cmdb_config_item": {
+              "name" : .InstanceId,
+              "ci_type_id" : "75000270995",
+              "level_field_attributes" : {
+                "aws_region_75000270981" : .var.awsregion,
+                "availability_zone_75000270981" : .Placement.AvailabilityZone,
+                "instance_id_75000270995": .InstanceId,
+                "instance_type_75000270995": .InstanceType,
+                "private_ip_75000270995" : .PrivateIpAddress,
+                "private_dns_75000270995" : .PrivateDnsName,
+                "public_ip_75000270995" : .PublicIpAddress,
+                "public_dns_75000270995" : .PublicDnsName,
+                "instance_state_75000270995" : .State.Name
+              }
+            }
+          })'
+    transform: 'jq(.msg = .return.body.item.config_item)'
+    transition: send-approval-message
+  #
+  #
+  # Update the instance in the CMDB
+  - id: update-cmdb
+    type: action
+    log: jq(.)
+    action:
+      secrets: ["FRESH_USERNAME","FRESH_PASSWORD"]
+      function: query-fresh-service-cmdb
+      input: 
+        method: "PUT"
+        url: 'jq(.var.freshurl + "/cmdb/items/" + (.return.body.config_items[0].display_id|tostring) + ".json")'
+        username: jq(.secrets.FRESH_USERNAME)
+        password: jq(.secrets.FRESH_PASSWORD)
+        headers: 
+          "Content-Type": "application/json"
+        body: 'jq({
+            "cmdb_config_item": {
+              "name" : .return.body.config_items[0].name,
+              "level_field_attributes" : {
+                "instance_state_75000270995" : ."EC2 Instance State-change Notification".detail.state
+              }
+            }
+          })'
+    transform: 'jq(.msg = .return.body.item.config_item | del(.return) | del(."EC2 Instance State-change Notification"))'
+    transition: send-approval-message
+    
+  - id: print-machine-state
+    type: noop
+    log: jq(.)
+#
+#
+# This section sends the message to the Google Chat room    
+  - id: send-approval-message
+    log: jq(.)
+    type: action
+    action:
+      function: send-google-chat-msg
+      input:
+        message: 'jq("AWS Instance " + .msg.name + " state changed to " + .msg.levelfield_values.instance_state_75000270995)'

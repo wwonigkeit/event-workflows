@@ -1,0 +1,167 @@
+################################################################################
+#
+# This workflow setst the following secrets:
+#  - FRESH_USERNAME: ServiceAccount key for the Google Cloud Translator
+#  - FRESH_PASSWORD: Bearer Token for the use with Twitter API
+#
+description: This workflows sets up the demo for the event workflows demos
+
+functions:
+- id: get-request
+  image: direktiv/request:latest
+  type: knative-workflow
+
+states:
+  # make sure all the inputs are set
+  - id: validate-input
+    type: validate
+    schema:
+      title: Setup workflow environment
+      type: object
+      required: ["freshusername", "freshpasswd", "freshurl", "awskey", "awssecret", "awsregion", "direktivnamespace", "direktivurl"]
+      properties:
+        freshusername:
+          title: FreshService username
+          type: string
+        freshpasswd:
+          title: FreshService username
+          type: string
+          default: "password"
+        freshurl:
+            title: FreshService URL
+            type: string
+            default: "https://direktiv.freshservice.com"
+        awskey:
+          title: AWS key
+          type: string
+        awssecret:
+          title: AWS Secret
+          type: string  
+        awsregion:
+          title: AWS Region Code
+          type: string
+          default: "ap-southeast-2"        
+        direktivtoken:
+          title: Direktiv Auth Token
+          type: string
+        direktivnamespace:
+          title: Direktiv Namespace
+          type: string
+          default: "event-workflows"
+        direktivurl:
+          title: Direktiv URL
+          type: string
+          default: "https://demo.direktiv.io"
+        googlechaturl:
+          title: Google Chat Room URL
+          type: string
+    transition: create-fresh-username
+
+  - id: create-fresh-username
+    type: action
+    action:
+      function: get-request
+      input: 
+        method: "PUT"
+        url: 'jq(.direktivurl)/api/namespaces/jq(.direktivnamespace)/secrets/FRESH_USERNAME'
+        headers:
+          "direktiv-token": jq(.direktivtoken)
+        body: jq(.freshusername)
+        insecureSkipVerify: true
+    catch:
+      - error: "*"
+    transition: create-fresh-passwd
+
+  - id: create-fresh-passwd
+    type: action
+    action:
+      function: get-request
+      input: 
+        method: "PUT"
+        url: 'jq(.direktivurl)/api/namespaces/jq(.direktivnamespace)/secrets/FRESH_PASSWORD'
+        headers:
+          "direktiv-token": jq(.direktivtoken)
+        body: jq(.freshpasswd)
+        insecureSkipVerify: true
+    catch:
+      - error: "*"
+    transition: create-fresh-url
+
+  - id: create-fresh-url
+    type: action
+    action:
+      function: get-request
+      input: 
+        method: "PUT"
+        url: 'jq(.direktivurl)/api/namespaces/jq(.direktivnamespace)/tree/aws-events/aws-cloudevents-freshservice?op=set-var&var=freshurl'
+        headers:
+          "direktiv-token": jq(.direktivtoken)
+        body: '"jq(.freshurl)"'
+        insecureSkipVerify: true
+    catch:
+      - error: "*"
+    transition: create-aws-key
+
+  - id: create-aws-key
+    type: action
+    action:
+      function: get-request
+      input: 
+        method: "PUT"
+        url: 'jq(.direktivurl)/api/namespaces/jq(.direktivnamespace)/secrets/AWS_KEY'
+        headers:
+          "direktiv-token": jq(.direktivtoken)
+        body: jq(.awskey)
+        insecureSkipVerify: true
+    catch:
+      - error: "*"
+    transition: create-aws-secret  
+
+  - id: create-aws-secret 
+    type: action
+    action:
+      function: get-request
+      input: 
+        method: "PUT"
+        url: 'jq(.direktivurl)/api/namespaces/jq(.direktivnamespace)/secrets/AWS_SECRET'
+        headers:
+          "direktiv-token": jq(.direktivtoken)
+        body: jq(.awssecret)
+        insecureSkipVerify: true
+    catch:
+      - error: "*"
+    transition: create-aws-region
+
+  - id: create-aws-region
+    type: action
+    action:
+      function: get-request
+      input: 
+        method: "PUT"
+        url: 'jq(.direktivurl)/api/namespaces/jq(.direktivnamespace)/tree/aws-events/aws-cloudevents-freshservice?op=set-var&var=awsregion'
+        headers:
+          "direktiv-token": jq(.direktivtoken)
+        body: '"jq(.awsregion)"'
+        insecureSkipVerify: true
+    catch:
+      - error: "*"
+    transition: create-gogolechat-url
+
+  - id: create-gogolechat-url
+    type: action
+    action:
+      function: get-request
+      input: 
+        method: "PUT"
+        url: 'jq(.direktivurl)/api/namespaces/jq(.direktivnamespace)/secrets/GOOGLE_CHAT_WEBHOOK'
+        headers:
+          "direktiv-token": jq(.direktivtoken)
+        body: jq(.googlechaturl)
+        insecureSkipVerify: true
+    catch:
+      - error: "*"
+    transition: logall    
+
+  - id: logall
+    type: noop
+    log: jq(.)

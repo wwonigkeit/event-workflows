@@ -1,0 +1,89 @@
+# Example workflow: 'Get Dad Joke'
+# 
+# This workflow showcases some basic Direktiv functionality.
+# On execution, this workflow gets a random 'dad joke' from 
+# an external web service, and prompts the user for feedback.
+# The workflow proceeds based on the feedback received.
+
+description: "Get a Dad Joke and ask the user if they like it or not"
+
+functions:
+  - id: get
+    image: direktiv/request:latest
+    type: reusable
+
+states:
+
+  # Sends a GET requests to an external web service to 
+  # fetch and display a 'dad joke'. Transitions to the 
+  # 'ask-for-feedback' state.
+  - id: get-dad-joke
+    type: action
+    action:
+      function: get
+      input:
+        method: GET
+        url: https://icanhazdadjoke.com
+        headers:
+          "Accept": "application/json"
+    transform: 'jq({ joke: .return.body.joke })'
+    transition: ask-for-feedback
+    
+  # Log a message, asking the user whether or not they 
+  # think the joke is funny. Transitions to the 
+  # 'wait-for-feedback' state.
+  - id: ask-for-feedback
+    log: 'jq(.joke)'
+    type: noop
+    transform: 'jq( .msg = "Did you like this joke? Hint: execute one of the workflows in your list." )'
+    transition: wait-for-feedback
+    
+  # This state waits until the parent namespace receives
+  # a 'cloud event' of the appropriate type. This is 
+  # the point at which the user should trigger either the 
+  # 'feedback-joke-is-funny' workflow, or the
+  # 'feedback-joke-is-not-funny' workflow. Transitions to 
+  # the 'handle-event' state.
+  - id: wait-for-feedback
+    log: 'jq(.msg)'
+    type: consumeEvent
+    event:
+      type: dad-joke-feedback
+      context:
+        source: 'direktiv.dadjoke'
+    timeout: PT15M
+    transition: handle-event
+    
+  # Based on the contents of the received cloud event,
+  # transition to one of three states. If the cloud event
+  # contained '"answer": "yes"', transition to 'success'
+  # state. If it contained '"answer": "no"', transition to
+  # 'fail' state. If neither conditions are matched, 
+  # transition to 'error' state.
+  - id: handle-event
+    type: switch
+    conditions:
+      - condition: 'jq(."dad-joke-feedback".data.answer == "yes")'
+        transition: success
+      - condition: 'jq(."dad-joke-feedback".data.answer == "no")'
+        transition: fail
+    defaultTransition: error
+    
+  # The user provided feedback that the joke was funny.
+  # This state prints an acknowledgment to the logs.
+  - id: success
+    type: noop
+    log: "Glad you liked it! :)"
+    
+  # The user provided feedback that the joke was not funny.
+  # This state prints an apology to the logs.
+  - id: fail
+    type: noop
+    log: "Sorry to hear that; I'll try better next time. :("
+    
+  # A cloud event was received, but did not contain a 
+  # recognized value within the 'answer' field.
+  # Logs a helpful error message.
+  - id: error
+    type: noop
+    log: "Unknown response, please use 'yes' or 'no'."

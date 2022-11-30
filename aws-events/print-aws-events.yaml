@@ -1,0 +1,32 @@
+# Example workflow: 'Simple event-driven workflow'
+# 
+#
+# This workflow will print any AWS EC2 events received.
+#
+#
+
+description: "Workflow which receives and process AWS EC2 instances state changes"
+start:
+  type: event
+  state: check-machine-state
+  event: 
+    type: "EC2 Instance State-change Notification"
+states:
+- id: check-machine-state
+  type: switch
+  log: jq(.)
+  conditions:
+  - condition: 'jq(."EC2 Instance State-change Notification".detail.state == "running")'
+    transition: running-action
+  - condition: 'jq(."EC2 Instance State-change Notification".detail.state == "stopped")'
+    transition: stopped-action    
+  defaultTransition: print-event
+- id: running-action
+  type: noop
+  transform: 'jq({ msg: "Add your running actions here" })'
+- id: stopped-action
+  type: noop
+  transform: 'jq({ msg: "Add your stopped actions here" })'
+- id: print-event
+  type: noop
+  log: jq(.) 

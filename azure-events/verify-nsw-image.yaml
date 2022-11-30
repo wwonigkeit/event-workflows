@@ -1,0 +1,146 @@
+# Example workflow: 'Check image uploaded to Azure Blob Storage for SFW/NSFW'
+# 
+#
+# This workflow will be started based on a Microsoft.Storage.BlobCreate event
+# being received. It will process the image being uploaded using Google Vision,
+# add a watermark using a Lambda function and then move the watermarked image
+# to the correct container in Azure
+#
+#
+# TOKEN: <direktiv-token>
+# 
+#
+
+description: "Classify an image uploaded to Azure Blob Storage as SFW or NSFW using Google Vision, AWS Lambda and Azure Storage functions"
+start:
+  type: event
+  state: get-rating-from-google-vision
+  event:
+    type: Microsoft.Storage.BlobCreated
+functions:
+- id: imagecheck
+  image: vorteil/imagerecognition:latest
+  type: reusable
+- id: awslambda
+  image: vorteil/lambda:latest
+  type: reusable
+- id: send-email
+  image: vorteil/smtp:latest
+  type: reusable
+- id: azureupload
+  image: vorteil/azure-upload:latest
+  type: reusable
+- id: azurecli3
+  image: vorteil/azgo:latest
+  type: reusable
+states:
+- id: get-rating-from-google-vision
+  type: action
+  action:
+    secrets: ["GOOGLE_SERVICE_ACCOUNT_KEY"]
+    function: imagecheck
+    input:
+      url: 'jq(."Microsoft.Storage.BlobCreated".url)'
+      serviceAccountKey: jq(.secrets.GOOGLE_SERVICE_ACCOUNT_KEY)
+  transition: check-rating-for-image
+  catch:
+  - error: "com.imagerecognition.error"
+    transition: check-error
+- id: check-error
+  log: jq(.)
+  type: switch
+  conditions:
+  - condition: 'jq(.error.msg | test("DeadlineExceeded"))'
+    transition: get-rating-from-google-vision
+  defaultTransition: print-error
+- id: print-error
+  log: jq(.)
+  type: noop
+- id: check-rating-for-image
+  log: jq(.)
+  type: switch
+  conditions:
+  - condition: 'jq(.return.safeForWork == true)'
+    transition: add-water-mark-approved
+  defaultTransition: add-water-mark-not-approved
+- id: add-water-mark-approved
+  type: action
+  action: 
+    function: awslambda
+    secrets: ["AWS_KEY", "AWS_SECRET"]
+    input:
+      key: jq(.secrets.AWS_KEY)
+      secret: jq(.secrets.AWS_SECRET)
+      region: "ap-southeast-2"
+      function: "python-watermark"
+      body:
+        imageurl: 'jq(."Microsoft.Storage.BlobCreated".url)'
+        message: "Approved by Direktiv.io"
+  transform: 'jq(.notify = .return | del(.return))'
+  transition: copy-file-to-safe-for-work
+- id: add-water-mark-not-approved
+  type: action
+  action: 
+    function: awslambda
+    secrets: ["AWS_KEY", "AWS_SECRET"]
+    input:
+      key: jq(.secrets.AWS_KEY)
+      secret: jq(.secrets.AWS_SECRET)
+      region: "ap-southeast-2"
+      function: "python-watermark"
+      body:
+        imageurl: 'jq(."Microsoft.Storage.BlobCreated".url)'
+        message: "Not approved by Direktiv.io"
+  transform: 'jq(.notify = .return | del(.return))'
+  transition: send-email
+- id: send-email
+  type: action
+  log: jq(.)
+  action:
+    function: send-email
+    secrets: ["EMAIL_USER","EMAIL_PW"]
+    input:
+      from: jq(.secrets.EMAIL_USER)
+      to: jq([.secrets.EMAIL_PW])
+      subject: "Direktiv NSFW Image Workflow"
+      message: "NSFW Image detected"
+      server: "smtp.gmail.com"
+      port: 587
+      password: 'jq(.secrets.EMAIL_PW)'
+  transition: copy-file-to-not-safe-for-work
+- id: copy-file-to-not-safe-for-work
+  type: action
+  log: jq(.)
+  action:
+    secrets: ["AZ_STORAGE_ACCOUNT", "AZ_STORAGE_KEY"]
+    function: azureupload
+    input:
+      container: "not-safe-for-work"
+      storage-account: jq(.secrets.AZ_STORAGE_ACCOUNT)
+      storage-account-key: jq(.secrets.AZ_STORAGE_KEY)
+      data: 'jq(.notify.body)'
+      upload-name: 'jq(."Microsoft.Storage.BlobCreated".url | capture("(?<filename>[a-z.]+$)").filename)'
+  transition: cleanup
+- id: copy-file-to-safe-for-work
+  type: action
+  log: jq(.)
+  action:
+    secrets: ["AZ_STORAGE_ACCOUNT", "AZ_STORAGE_KEY"]
+    function: azureupload
+    input:
+      container: "safe-for-work"
+      storage-account: jq(.secrets.AZ_STORAGE_ACCOUNT)
+      storage-account-key: jq(.secrets.AZ_STORAGE_KEY)
+      data: 'jq(.notify.body)'
+      upload-name: 'jq(."Microsoft.Storage.BlobCreated".url | capture("(?<filename>[a-z.]+$)").filename)'
+  transition: cleanup
+- id: cleanup
+  type: action
+  action:
+    secrets: ["AZ_STORAGE_ACCOUNT", "AZ_NAME", "AZ_PASSWORD", "AZ_TENANT","AZ_STORAGE_KEY"]
+    function: azurecli3
+    input:
+      name: jq(.secrets.AZ_NAME)
+      password: jq(.secrets.AZ_PASSWORD)
+      tenant: jq(.secrets.AZ_TENANT)
+      command: 'jq(["storage", "blob", "delete", "--container", "processing", "--name", (."Microsoft.Storage.BlobCreated".url | split("processing/")[1]), "--account-name", .secrets.AZ_STORAGE_ACCOUNT, "--account-key", .secrets.AZ_STORAGE_KEY])'

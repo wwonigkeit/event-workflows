@@ -1,0 +1,15 @@
+# Example workflow: 'Joke is NOT funny'
+#
+# This workflow sends a basic cloud event to the 
+# parent namespace, with 'type' and 'source' 
+# fields configured to match those expected by 
+# the 'get-dad-joke' workflow.
+description: Generate an event that provides negative feedback to the 'get-dad-joke' workflow.
+states:
+  - id: generate
+    type: generateEvent
+    event:
+      type: dad-joke-feedback
+      source: direktiv.dadjoke
+      data:
+        answer: no

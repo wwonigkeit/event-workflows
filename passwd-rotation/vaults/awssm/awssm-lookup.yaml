@@ -1,0 +1,166 @@
+# Event Input:
+#  {
+#   "com.direktiv.awssm.lookup.request": {
+#     "data": {
+#       "ip": "3.26.24.101",
+#       "type": "linux",
+#       "user": "wwonigkeit",
+#       "vault": "awssm"
+#     },
+#     "datacontenttype": "application/json",
+#     "id": "2636c282-2adb-48b1-aafc-d6de7b717546",
+#     "ip": "3.26.24.101",
+#     "source": "rotate-passwords",
+#     "specversion": "1.0",
+#     "type": "com.direktiv.awssm.lookup.request",
+#     "vault": "awssm"
+#   }
+# }
+#
+# NOTE: for AWS Secrets Manager, the AWS_SECRET & AWS_KEY needs to be added as sercets in Direktiv
+description: AWS Secrets Manager lookup service
+
+#
+# The start definition which starts the worklfow based on the event received from the
+# master workflow. Example of the event is shown above in the description
+#
+start:
+  type: event
+  state: lookup-aws-secret
+  event: 
+    type: com.direktiv.awssm.lookup.request
+    context:
+      vault: "awssm"
+
+#
+# Define the "run-aws-command" knative-function to be used for all the AWS Secrets Manager 
+# queries and interaction
+#
+functions:
+- id: run-aws-command
+  image: direktiv/awsgo
+  type: knative-workflow
+
+states:
+#
+# First state looks up the secret from the AWS Secrets Manager service. The secrets stored 
+# as shown below:
+#
+# { 
+#     "vault": "http://13.239.47.38:8200", <----- this is the Vault URL
+#     "store": "credentials" <----- this is the Vault secrets location i.e. vault kv get credentials/13.239.47.38
+# }
+#
+- id: lookup-vault-address
+  log: jq(.)
+  type: getter
+  variables:
+    - key: hashicaddress
+      scope: namespace
+  transition: renew-vault-token
+
+#
+# Next state renews the vault token, stored as a secret in Direktiv. This is to ensure that the token doesn't 
+# or isn't expired.
+#
+- id: renew-vault-token
+  type: action
+  # log: jq(.)
+  action:
+    function: get-request
+    secrets: ["VAULT_TOKEN"]
+    input:
+      method: "POST"
+      url: 'jq(.var.hashicaddress.vault)/v1/auth/token/renew-self'
+      headers:
+        "X-Vault-Token": jq(.secrets.VAULT_TOKEN)
+    retries:
+      max_attempts: 3
+      delay: PT30S
+      multiplier: 2.0
+      codes: [".*"]
+  catch:
+    - error: "*"
+      transition: failed-connection
+  transition: retrieve-password
+
+#
+# Next state retrives the password from the location in Vault specified in the "hashicaddress" variable returned
+# by the initial "getter" state (state 1)
+#
+- id: retrieve-password
+  type: action
+  # log: jq(.)
+  action:
+    function: get-request
+    secrets: ["VAULT_TOKEN"]
+    input:
+      method: "GET"
+      url: 'jq(.var.hashicaddress.vault)/v1/jq(.var.hashicaddress.store)/data/jq(."com.direktiv.vault.lookup.request".data.ip)'
+      headers:
+        "X-Vault-Token": jq(.secrets.VAULT_TOKEN)
+    retries:
+      max_attempts: 3
+      delay: PT60S
+      multiplier: 2.0
+      codes: [".*"]
+  catch:
+    - error: "*"
+      transition: failed-connection
+  transform: jq(.return = .return | .oldpass = .return.body.data.data)
+  transition: check-response-retrieve
+
+#
+# Make sure we received a valid response
+#
+- id: check-response-retrieve
+  type: switch
+  # log: jq(.)
+  conditions:
+    - condition: 'jq(.return."status-code" != 200)'
+      transition: failed-request
+  defaultTransition: lookup-complete
+  defaultTransform: jq(.ip = ."com.direktiv.vault.lookup.request".data.ip | .endpoint = ."com.direktiv.vault.lookup.request".data.endpoint | .user = ."com.direktiv.vault.lookup.request".data.user | .vault = ."com.direktiv.vault.lookup.request".data.vault | .oldpass = .oldpass | del (.return) | del (."com.direktiv.vault.lookup.request") | del (.var))
+
+#
+# Handle any failed connections
+#
+- id: failed-connection
+  type: generateEvent
+  log: Connection to HashiCorp Vault failed - jq(.error)
+  event: 
+    type: com.direktiv.vault.lookup.failure
+    source: vaults/hashicorp-vault
+    data: jq(.error)
+    context:
+      vault: jq(.var.hashicaddress.vault)
+      msg: jq(.error)
+      error: connection
+
+#
+# Handle any failed API calls
+#
+- id: failed-request
+  type: generateEvent
+  log: API call failed with error code - jq(.return.status), jq(.return.body.errors)
+  event: 
+    type: com.direktiv.vault.lookup.failure
+    source: vaults/hashicorp-vault
+    data: jq(.return = .return | .data = ."com.direktiv.vault.lookup.request".data | .vault = .var.address.vault | del (."com.direktiv.vault.lookup.request") | del (.oldpass) | del (.var))
+    context:
+      vault: jq(.var.hashicaddress.vault)
+      error: request
+
+# Next state will generate a change passwordf event to the specific endpoint. The context is 
+# based on the selection in the previous state
+#
+- id: lookup-complete
+  type: generateEvent
+  log: jq(.)
+  event:
+    type: com.direktiv.vault.lookup.complete
+    source: vaults/hashicorp-vault
+    data: jq(.)
+    context:
+      ip: jq(.ip)
+      vault: jq(.vault)
